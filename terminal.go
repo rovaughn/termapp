@@ -1,10 +1,14 @@
-package main
+package termapp
 
 import (
+	"bufio"
+	"fmt"
 	"golang.org/x/crypto/ssh/terminal"
 	"os"
 	"strconv"
+	"syscall"
 	"unicode/utf8"
+	"unsafe"
 )
 
 // Opportunities for optimization:
@@ -26,33 +30,9 @@ type Color struct {
 	R, G, B uint8
 }
 
-// Will these "simple colors" come in handy?
-// const (
-// 	Black = iota
-// 	Red
-// 	Green
-// 	Yellow
-// 	Blue
-// 	Magenta
-// 	Cyan
-// 	White
-// )
-
-//type Flags uint8
-//
-//const (
-//	Bold = Flags(iota)
-//	Dim
-//	Underline
-//	Inverse
-//	Invisible
-//	Strikethrough
-//)
-
 type Style struct {
 	fore Color
 	back Color
-	//flags Flags
 }
 
 type Cell struct {
@@ -83,6 +63,12 @@ func NewScreen(width, height int) *Screen {
 var Black = Color{0x00, 0x00, 0x00}
 var White = Color{0xff, 0xff, 0xff}
 
+func (s *Screen) SetCursor(x, y int, visible bool) {
+	s.cursor.x = x
+	s.cursor.y = y
+	s.cursor.visible = visible
+}
+
 func (s *Screen) Print(x, y int, back, fore Color, text string) {
 	start := y*s.width + x
 	for i, r := range text {
@@ -96,10 +82,23 @@ func (s *Screen) Print(x, y int, back, fore Color, text string) {
 	}
 }
 
+func (s *Screen) PrintRune(x, y int, back, fore Color, text rune) {
+	s.cells[y*s.width+x] = Cell{
+		Style: Style{
+			back: back,
+			fore: fore,
+		},
+		text: text,
+	}
+}
+
 type Terminal struct {
-	f      *os.File
-	render RenderFunc
-	buf    []byte
+	f            *os.File
+	render       RenderFunc
+	buf          []byte
+	savedTermios syscall.Termios
+	ErrCh        chan error
+	KeyCh        chan Key
 	Screen
 }
 
@@ -122,18 +121,46 @@ func NewTerminal(f *os.File, render RenderFunc) (*Terminal, error) {
 		return nil, err
 	}
 
+	var termios syscall.Termios
+	if _, _, err := syscall.Syscall(
+		syscall.SYS_IOCTL,
+		f.Fd(),
+		syscall.TCGETS,
+		uintptr(unsafe.Pointer(&termios)),
+	); err != 0 {
+		return nil, fmt.Errorf("tcgetattr: %s", err)
+	}
+
 	t := &Terminal{
-		f:      f,
-		render: render,
+		f:            f,
+		savedTermios: termios,
+		render:       render,
 		Screen: Screen{
 			width:  width,
 			height: height,
 			cells:  make([]Cell, width*height),
 		},
+		KeyCh: make(chan Key),
+		ErrCh: make(chan error),
 	}
 
+	termios.Lflag ^= syscall.ICANON | syscall.ECHO
+	termios.Cc[syscall.VMIN] = 1
+	termios.Cc[syscall.VTIME] = 0
+
+	if _, _, err := syscall.Syscall(
+		syscall.SYS_IOCTL,
+		f.Fd(),
+		syscall.TCSETS,
+		uintptr(unsafe.Pointer(&termios)),
+	); err != 0 {
+		return nil, fmt.Errorf("tcsetattr: %s", err)
+	}
+
+	go t.readKeys()
+
 	// Clear the screen, so that we are in a known state.
-	t.clear()
+	t.clear(width, height)
 	t.redraw()
 
 	if err := t.flush(); err != nil {
@@ -143,12 +170,105 @@ func NewTerminal(f *os.File, render RenderFunc) (*Terminal, error) {
 	return t, nil
 }
 
-func (t *Terminal) clear() {
+func (t *Terminal) Close() error {
+	if _, _, err := syscall.Syscall(
+		syscall.SYS_IOCTL,
+		t.f.Fd(),
+		syscall.TCSETS,
+		uintptr(unsafe.Pointer(&t.savedTermios)),
+	); err != 0 {
+		return fmt.Errorf("tcsetattr: %s", err)
+	}
+
+	return nil
+}
+
+type Key uint16
+
+// It might make sense to make every special key 128 + its escape character,
+// e.g. KeyDown = 128 + 'B' = 128 + 66 = 194
+const (
+	KeyDel = 128 + iota
+	KeyEnd
+	KeyUp
+	KeyDown
+	KeyRight
+	KeyLeft
+	KeyHome
+)
+
+func (t *Terminal) readKeys() {
+	keyMap := map[byte]Key{
+		'3': KeyDel,
+		'4': KeyEnd,
+		'A': KeyUp,
+		'B': KeyDown,
+		'C': KeyRight,
+		'D': KeyLeft,
+		'H': KeyHome,
+	}
+	r := bufio.NewReader(t.f)
+
+	for {
+		c, err := r.ReadByte()
+		if err != nil {
+			t.ErrCh <- err
+			return
+		}
+
+		if c == '\x1b' {
+			c2, err := r.ReadByte()
+			if err != nil {
+				t.ErrCh <- err
+				return
+			}
+
+			if c2 == '[' {
+				c3, err := r.ReadByte()
+				if err != nil {
+					t.ErrCh <- err
+					return
+				}
+
+				key, ok := keyMap[c3]
+				if !ok {
+					t.ErrCh <- fmt.Errorf("Unknown escape key %q", c3)
+					return
+				}
+
+				t.KeyCh <- key
+			} else {
+				t.KeyCh <- Key(c)
+				t.KeyCh <- Key(c2)
+			}
+		} else {
+			t.KeyCh <- Key(c)
+		}
+	}
+}
+
+func (t *Terminal) clear(width, height int) {
+	t.setCursorStyle(Style{
+		back: Black,
+		fore: Black,
+	})
+	for i := 0; i < width*height; i++ {
+		t.buf = append(t.buf, ' ')
+	}
 	t.buf = append(t.buf, []byte("\x1b[H\x1b[2J\x1b[0m\x1b[?25l")...)
 }
 
 func (t *Terminal) moveCursor(x, y int) {
 	if t.cursor.x == x && t.cursor.y == y {
+		return
+	}
+
+	if t.cursor.y == y && t.cursor.x < x {
+		t.buf = append(t.buf, []byte("\x1b[")...)
+		if x-t.cursor.x > 1 {
+			t.buf = strconv.AppendInt(t.buf, int64(x-t.cursor.x), 10)
+		}
+		t.buf = append(t.buf, 'C')
 		return
 	}
 
@@ -162,17 +282,8 @@ func (t *Terminal) moveCursor(x, y int) {
 	t.cursor.y = y
 }
 
-var numTable = func() (table []string) {
-	table = make([]string, 256)
-	for i := 0; i < 256; i++ {
-		table[i] = strconv.Itoa(i)
-	}
-	return
-}()
-
 func (t *Terminal) setCursorStyle(s Style) {
 	// SGR is short for Select Graphic Rendition
-	//var sgrs []int
 	sgrs := make([]int, 0, 10)
 
 	if s.fore != t.cursor.fore {
@@ -187,12 +298,10 @@ func (t *Terminal) setCursorStyle(s Style) {
 
 	if len(sgrs) > 0 {
 		t.buf = append(t.buf, []byte("\x1b[")...)
-		//t.buf = strconv.AppendInt(t.buf, sgrs[0], 10)
-		t.buf = append(t.buf, numTable[sgrs[0]]...)
+		t.buf = strconv.AppendInt(t.buf, int64(sgrs[0]), 10)
 		for _, sgr := range sgrs[1:] {
 			t.buf = append(t.buf, ';')
-			//t.buf = strconv.AppendInt(t.buf, sgr, 10)
-			t.buf = append(t.buf, numTable[sgr]...)
+			t.buf = strconv.AppendInt(t.buf, int64(sgr), 10)
 		}
 		t.buf = append(t.buf, 'm')
 	}
@@ -200,16 +309,15 @@ func (t *Terminal) setCursorStyle(s Style) {
 
 func (t *Terminal) setCursorVisibility(visible bool) {
 	if visible && !t.cursor.visible {
-		t.buf = append(t.buf, []byte("\x1b[?25l")...)
-	} else if !visible && t.cursor.visible {
 		t.buf = append(t.buf, []byte("\x1b[?25h")...)
+	} else if !visible && t.cursor.visible {
+		t.buf = append(t.buf, []byte("\x1b[?25l")...)
 	}
+	t.cursor.visible = visible
 }
 
 func (t *Terminal) redraw() {
 	newScreen := t.render(t.width, t.height)
-
-	t.setCursorVisibility(newScreen.cursor.visible)
 
 	p := make([]byte, 4)
 
@@ -236,6 +344,7 @@ func (t *Terminal) redraw() {
 	}
 
 	t.moveCursor(newScreen.cursor.x, newScreen.cursor.y)
+	t.setCursorVisibility(newScreen.cursor.visible)
 }
 
 func (t *Terminal) Redraw() error {
