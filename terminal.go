@@ -72,7 +72,11 @@ func (s *Screen) SetCursor(x, y int, visible bool) {
 
 func (s *Screen) Print(x, y int, back, fore Color, text string) {
 	start := y*s.width + x
+	end := (y + 1) * s.width
 	for i, r := range text {
+		if start+i >= end {
+			break
+		}
 		s.cells[start+i] = Cell{
 			Style: Style{
 				back: back,
