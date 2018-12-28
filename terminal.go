@@ -177,6 +177,15 @@ func NewTerminal(f *os.File, render RenderFunc) (*Terminal, error) {
 }
 
 func (t *Terminal) Close() error {
+	t.setCursorStyle(Style{
+		back: Black,
+		fore: White,
+	})
+	t.setCursorVisibility(true)
+	if err := t.flush(); err != nil {
+		return err
+	}
+
 	if _, _, err := syscall.Syscall(
 		syscall.SYS_IOCTL,
 		t.f.Fd(),
@@ -353,6 +362,17 @@ func (t *Terminal) redraw() {
 }
 
 func (t *Terminal) Redraw() error {
+	t.redraw()
+	return t.flush()
+}
+
+func (t *Terminal) Invalidate() error {
+	width, height, err := terminal.GetSize(int(t.f.Fd()))
+	if err != nil {
+		return err
+	}
+
+	t.clear(width, height)
 	t.redraw()
 	return t.flush()
 }
