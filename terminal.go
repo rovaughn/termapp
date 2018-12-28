@@ -265,9 +265,6 @@ func (t *Terminal) clear(width, height int) {
 }
 
 func (t *Terminal) moveCursor(x, y int) {
-	t.cursor.x = x
-	t.cursor.y = y
-
 	if t.cursor.x == x && t.cursor.y == y {
 		return
 	}
@@ -278,14 +275,16 @@ func (t *Terminal) moveCursor(x, y int) {
 			t.buf = strconv.AppendInt(t.buf, int64(x-t.cursor.x), 10)
 		}
 		t.buf = append(t.buf, 'C')
-		return
+	} else {
+		t.buf = append(t.buf, []byte("\x1b[")...)
+		t.buf = strconv.AppendInt(t.buf, int64(y)+1, 10)
+		t.buf = append(t.buf, ';')
+		t.buf = strconv.AppendInt(t.buf, int64(x)+1, 10)
+		t.buf = append(t.buf, 'H')
 	}
 
-	t.buf = append(t.buf, []byte("\x1b[")...)
-	t.buf = strconv.AppendInt(t.buf, int64(y)+1, 10)
-	t.buf = append(t.buf, ';')
-	t.buf = strconv.AppendInt(t.buf, int64(x)+1, 10)
-	t.buf = append(t.buf, 'H')
+	t.cursor.x = x
+	t.cursor.y = y
 }
 
 func (t *Terminal) setCursorStyle(s Style) {
