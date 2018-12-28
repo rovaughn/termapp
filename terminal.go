@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"golang.org/x/crypto/ssh/terminal"
+	"io"
 	"os"
 	"strconv"
 	"syscall"
@@ -94,6 +95,7 @@ func (s *Screen) PrintRune(x, y int, back, fore Color, text rune) {
 
 type Terminal struct {
 	f            *os.File
+	Logf         io.Writer
 	render       RenderFunc
 	buf          []byte
 	savedTermios syscall.Termios
@@ -103,6 +105,10 @@ type Terminal struct {
 }
 
 func (t *Terminal) flush() error {
+	if t.Logf != nil {
+		t.Logf.Write(t.buf)
+	}
+
 	n, err := t.f.Write(t.buf)
 	if n == len(t.buf) {
 		t.buf = t.buf[:0]
