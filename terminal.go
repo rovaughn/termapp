@@ -177,12 +177,7 @@ func NewTerminal(f *os.File, render RenderFunc) (*Terminal, error) {
 }
 
 func (t *Terminal) Close() error {
-	t.setCursorStyle(Style{
-		back: Black,
-		fore: White,
-	})
-	t.setCursorVisibility(true)
-	if err := t.flush(); err != nil {
+	if err := t.Invalidate(); err != nil {
 		return err
 	}
 
@@ -265,8 +260,9 @@ func (t *Terminal) readKeys() {
 func (t *Terminal) clear(width, height int) {
 	t.setCursorStyle(Style{
 		back: Black,
-		fore: Black,
+		fore: White,
 	})
+	t.setCursorVisibility(true)
 	for i := 0; i < width*height; i++ {
 		t.buf = append(t.buf, ' ')
 	}
@@ -373,6 +369,5 @@ func (t *Terminal) Invalidate() error {
 	}
 
 	t.clear(width, height)
-	t.redraw()
-	return t.flush()
+	return t.Redraw()
 }
